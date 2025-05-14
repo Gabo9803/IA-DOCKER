@@ -1,0 +1,58 @@
+services:
+  - type: web
+    name: chatbot-app
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    numInstances: 1
+    healthCheckPath: /
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: OPENAI_API_KEY
+        fromService:
+          type: env
+          name: OPENAI_API_KEY
+      - key: POSTGRES_USER
+        fromService:
+          type: database
+          name: chatbot-db
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromService:
+          type: database
+          name: chatbot-db
+          property: password
+      - key: POSTGRES_DB
+        fromService:
+          type: database
+          name: chatbot-db
+          property: database
+      - key: POSTGRES_HOST
+        fromService:
+          type: database
+          name: chatbot-db
+          property: host
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: chatbot-redis
+          property: connectionString
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 1
+    autoDeploy: true
+
+  - type: database
+    name: chatbot-db
+    ipAllowList: []
+    plan: free
+    databaseType: postgresql
+    version: "13"
+
+  - type: redis
+    name: chatbot-redis
+    ipAllowList: []
+    plan: free
+    maxmemoryPolicy: volatile-lru
