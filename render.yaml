@@ -4,13 +4,14 @@ services:
     env: docker
     dockerfilePath: ./Dockerfile
     plan: free
+    region: oregon  # Specify region (e.g., oregon, frankfurt, singapore)
     numInstances: 1
     healthCheckPath: /
     envVars:
       - key: FLASK_ENV
         value: production
       - key: OPENAI_API_KEY
-        sync: false
+        sync: false  # Set manually in Render dashboard
       - key: DATABASE_URL
         fromService:
           type: database
@@ -26,11 +27,13 @@ services:
   - type: database
     name: chatbot-db
     plan: free
+    region: oregon  # Must match web service region
     databaseName: chatbot_db
     version: "13"
 
   - type: redis
     name: chatbot-redis
-    ipAllowList: []
     plan: free
+    region: oregon  # Must match web service region
+    ipAllowList: []
     maxmemoryPolicy: volatile-lru
