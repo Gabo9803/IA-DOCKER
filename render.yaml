@@ -10,27 +10,25 @@ services:
       - key: FLASK_ENV
         value: production
       - key: OPENAI_API_KEY
-        fromService:
-          type: env
-          name: OPENAI_API_KEY
+        sync: false
       - key: POSTGRES_USER
         fromService:
-          type: database
+          type: pserv
           name: chatbot-db
           property: user
       - key: POSTGRES_PASSWORD
         fromService:
-          type: database
+          type: pserv
           name: chatbot-db
           property: password
       - key: POSTGRES_DB
         fromService:
-          type: database
+          type: pserv
           name: chatbot-db
           property: database
       - key: POSTGRES_HOST
         fromService:
-          type: database
+          type: pserv
           name: chatbot-db
           property: host
       - key: REDIS_URL
@@ -44,12 +42,23 @@ services:
       sizeGB: 1
     autoDeploy: true
 
-  - type: database
+  - type: pserv
     name: chatbot-db
-    ipAllowList: []
+    env: docker
     plan: free
-    databaseType: postgresql
-    version: "13"
+    dockerCommand: postgres
+    disk:
+      name: pg-data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 1
+    envVars:
+      - key: POSTGRES_USER
+        value: postgres
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+      - key: POSTGRES_DB
+        value: chatbot_db
+    autoDeploy: false
 
   - type: redis
     name: chatbot-redis
