@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registrarse</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body class="bg-gray-900 text-gray-100 font-inter flex items-center justify-center h-screen transition-colors duration-300" id="themeBody">
+    <div class="max-w-md w-full bg-gradient-to-br from-gray-800 to-gray-900 p-8 rounded-lg shadow-lg">
+        <h2 class="text-2xl font-semibold text-white mb-6 text-center">Registrarse</h2>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="bg-red-600 text-white p-3 rounded mb-4">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <form method="POST" onsubmit="return validateRegister()">
+            <div class="mb-4">
+                <label for="username" class="block text-gray-300 mb-2">Usuario</label>
+                <input type="text" id="username" name="username" class="w-full bg-gray-700 text-white p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-600" required>
+            </div>
+            <div class="mb-6">
+                <label for="password" class="block text-gray-300 mb-2">Contraseña</label>
+                <input type="password" id="password" name="password" class="w-full bg-gray-700 text-white p-3 rounded focus:outline-none focus:ring-2 focus:ring-blue-600" required>
+            </div>
+            <button type="submit" class="w-full bg-blue-600 text-white p-3 rounded hover:bg-blue-700 transition">Registrarse</button>
+        </form>
+        <p class="text-gray-300 text-center mt-4">¿Ya tienes cuenta? <a href="{{ url_for('login') }}" class="text-blue-400 hover:underline">Inicia sesión</a></p>
+    </div>
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
