@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, flash, send_from_directory
 from flask_socketio import SocketIO, emit
 from openai import OpenAI
 import psycopg2
@@ -22,21 +22,20 @@ app.secret_key = os.urandom(24)
 socketio = SocketIO(app)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-redis_client = redis.Redis(host='redis', port=6379, decode_responses=True)
+redis_client = redis.Redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
 
+# Database connection using DATABASE_URL
+DATABASE_URL = os.getenv("DATABASE_URL")
 db_pool = pool.SimpleConnectionPool(
     1, 20,
-    user=os.getenv("POSTGRES_USER"),
-    password=os.getenv("POSTGRES_PASSWORD"),
-    host="db",
-    port="5432",
-    database=os.getenv("POSTGRES_DB")
+    dsn=DATABASE_URL
 )
 
-UPLOAD_FOLDER = '/app/uploads'
+# Ephemeral storage for file uploads (free tier)
+UPLOAD_FOLDER = '/tmp/uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-ALLOWED_EXTENSIONS = {'txt', 'pdf', 'jpg', 'jpeg', 'png'}
+ALLOWED_EXTENSIONS = {'txt', 'jpg', 'jpeg', 'png'}  # Removed 'pdf' for free tier
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -315,6 +314,7 @@ def chat():
             with open(filepath, 'rb') as f:
                 encoded_image = base64.b64encode(f.read()).decode('utf-8')
                 message += f"\n[Imagen: {filename}]"
+        # Note: Files in /tmp/uploads are ephemeral in Render free tier
 
     if not message.strip() and not file:
         return jsonify({'error': 'Mensaje vacío'}), 400
@@ -376,12 +376,16 @@ def chat():
                     ]
                 })
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_tokens=500
-            )
-            ai_response = response.choices[0].message.content
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_tokens=500,
+                    temperature=0.7
+                )
+                ai_response = response.choices[0].message.content
+            except Exception as e:
+                return jsonify({'error': f'Error en la API de OpenAI: {str(e)}'}), 500
 
             cur.execute(
                 "SELECT avatar FROM user_profiles WHERE user_id = %s",
@@ -407,6 +411,10 @@ def chat():
             return jsonify(response_data)
     finally:
         db_pool.putconn(conn)
+
+@app.route('/static/uploads/<filename>')
+def uploaded_file(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 @app.route('/edit_message', methods=['POST'])
 def edit_message():
