@@ -11,54 +11,23 @@ services:
         value: production
       - key: OPENAI_API_KEY
         sync: false
-      - key: POSTGRES_USER
+      - key: DATABASE_URL
         fromService:
-          type: pserv
+          type: database
           name: chatbot-db
-          property: user
-      - key: POSTGRES_PASSWORD
-        fromService:
-          type: pserv
-          name: chatbot-db
-          property: password
-      - key: POSTGRES_DB
-        fromService:
-          type: pserv
-          name: chatbot-db
-          property: database
-      - key: POSTGRES_HOST
-        fromService:
-          type: pserv
-          name: chatbot-db
-          property: host
+          property: connectionString
       - key: REDIS_URL
         fromService:
           type: redis
           name: chatbot-redis
           property: connectionString
-    disk:
-      name: uploads
-      mountPath: /app/uploads
-      sizeGB: 1
     autoDeploy: true
 
-  - type: pserv
+  - type: database
     name: chatbot-db
-    env: docker
     plan: free
-    dockerCommand: postgres
-    disk:
-      name: pg-data
-      mountPath: /var/lib/postgresql/data
-      sizeGB: 1
-    envVars:
-      - key: POSTGRES_USER
-        value: postgres
-      - key: POSTGRES_PASSWORD
-        generateValue: true
-      - key: POSTGRES_DB
-        value: chatbot_db
-    autoDeploy: false
+    databaseName: chatbot_db
+    version: "13"
 
   - type: redis
     name: chatbot-redis
