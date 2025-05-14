@@ -14,6 +14,11 @@ import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 from langdetect import detect, DetectorFactory
 from werkzeug.utils import secure_filename
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -33,7 +38,11 @@ db_pool = pool.SimpleConnectionPool(
 
 # Ephemeral storage for file uploads (free tier)
 UPLOAD_FOLDER = '/tmp/uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+try:
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    os.chmod(UPLOAD_FOLDER, 0o777)  # Ensure write permissions
+except Exception as e:
+    logger.error(f"Failed to create/set permissions for UPLOAD_FOLDER: {e}")
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {'txt', 'jpg', 'jpeg', 'png'}  # Removed 'pdf' for free tier
 
@@ -106,6 +115,9 @@ def init_db():
                 );
             """)
             conn.commit()
+            logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
     finally:
         db_pool.putconn(conn)
 
@@ -140,6 +152,9 @@ def check_achievements(user_id):
                 achievements.append({"name": "Primeros Pasos", "description": "Enviados 10 mensajes"})
             conn.commit()
             return achievements
+    except Exception as e:
+        logger.error(f"Failed to check achievements: {e}")
+        return []
     finally:
         db_pool.putconn(conn)
 
@@ -149,6 +164,9 @@ def achievement_exists(user_id, name):
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM achievements WHERE user_id = %s AND name = %s", (user_id, name))
             return cur.fetchone() is not None
+    except Exception as e:
+        logger.error(f"Failed to check achievement existence: {e}")
+        return False
     finally:
         db_pool.putconn(conn)
 
@@ -171,8 +189,12 @@ def login():
                 if user and bcrypt.checkpw(password.encode('utf-8'), user[1]):
                     session['user_id'] = user[0]
                     session['username'] = username
+                    logger.info(f"User {username} logged in")
                     return redirect(url_for('index'))
                 flash('Usuario o contraseña incorrectos', 'error')
+                logger.warning(f"Failed login attempt for username: {username}")
+        except Exception as e:
+            logger.error(f"Login error: {e}")
         finally:
             db_pool.putconn(conn)
     return render_template('login.html')
@@ -184,6 +206,7 @@ def register():
         password = request.form.get('password')
         if len(password) < 6:
             flash('La contraseña debe tener al menos 6 caracteres', 'error')
+            logger.warning("Registration failed: Password too short")
             return render_template('register.html')
         hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
         conn = db_pool.getconn()
@@ -192,6 +215,7 @@ def register():
                 cur.execute("SELECT id FROM users WHERE username = %s", (username,))
                 if cur.fetchone():
                     flash('El usuario ya existe', 'error')
+                    logger.warning(f"Registration failed: Username {username} already exists")
                 else:
                     cur.execute("INSERT INTO users (username, password) VALUES (%s, %s) RETURNING id",
                                (username, hashed_password))
@@ -201,22 +225,27 @@ def register():
                     conn.commit()
                     session['user_id'] = user_id
                     session['username'] = username
+                    logger.info(f"User {username} registered successfully")
                     return redirect(url_for('index'))
         except psycopg2.IntegrityError:
             flash('Error al registrar el usuario', 'error')
+            logger.error("Registration failed: Integrity error")
         finally:
             db_pool.putconn(conn)
     return render_template('register.html')
 
 @app.route('/logout')
 def logout():
+    username = session.get('username', 'unknown')
     session.pop('user_id', None)
     session.pop('username', None)
+    logger.info(f"User {username} logged out")
     return redirect(url_for('login'))
 
 @app.route('/history', methods=['GET'])
 def history():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /history")
         return jsonify({'error': 'No autenticado'}), 401
     conn = db_pool.getconn()
     try:
@@ -228,13 +257,18 @@ def history():
                 (session['user_id'],)
             )
             messages = [{'id': row[0], 'user_message': row[1], 'ai_response': row[2], 'timestamp': row[3].strftime('%H:%M:%S'), 'edited': row[4], 'file_url': row[5], 'file_name': row[6], 'avatar': row[7]} for row in cur.fetchall()]
-        return jsonify(messages)
+            logger.info(f"Retrieved chat history for user_id: {session['user_id']}")
+            return jsonify(messages)
+    except Exception as e:
+        logger.error(f"Failed to retrieve history: {e}")
+        return jsonify({'error': 'Error al recuperar el historial'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/preferences', methods=['GET', 'POST'])
 def preferences():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /preferences")
         return jsonify({'error': 'No autenticado'}), 401
     conn = db_pool.getconn()
     try:
@@ -247,14 +281,20 @@ def preferences():
                 profile_picture = request.files.get('profile_picture')
 
                 if model not in ['gpt-3.5-turbo', 'gpt-4o'] or tone not in ['formal', 'informal', 'humorístico', 'técnico']:
+                    logger.warning(f"Invalid preferences submitted: model={model}, tone={tone}")
                     return jsonify({'error': 'Preferencias inválidas'}), 400
 
                 avatar_url = None
                 if profile_picture and allowed_file(profile_picture.filename):
                     filename = secure_filename(profile_picture.filename)
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                    profile_picture.save(filepath)
-                    avatar_url = f"/static/uploads/{filename}"
+                    try:
+                        profile_picture.save(filepath)
+                        avatar_url = f"/static/uploads/{filename}"
+                        logger.info(f"Profile picture uploaded: {filename}")
+                    except Exception as e:
+                        logger.error(f"Failed to save profile picture: {e}")
+                        return jsonify({'error': 'Error al subir la imagen'}), 500
 
                 cur.execute(
                     "INSERT INTO user_preferences (user_id, model, tone, language) "
@@ -269,6 +309,7 @@ def preferences():
                     (session['user_id'], avatar_url, bio)
                 )
                 conn.commit()
+                logger.info(f"Preferences updated for user_id: {session['user_id']}")
                 return jsonify({'success': 'Preferencias guardadas', 'avatar': avatar_url})
             else:
                 cur.execute(
@@ -288,40 +329,52 @@ def preferences():
                     'avatar': profile[0] if profile else None,
                     'bio': profile[1] if profile else ''
                 })
+    except Exception as e:
+        logger.error(f"Failed to handle preferences: {e}")
+        return jsonify({'error': 'Error al procesar preferencias'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/chat', methods=['POST'])
 def chat():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /chat")
         return jsonify({'error': 'No autenticado'}), 401
 
     message = request.form.get('message', '')
     file = request.files.get('file')
     file_url = None
     file_name = None
+    upload_warning = None
 
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        file_url = f"/static/uploads/{filename}"
-        file_name = filename
-        if file.mimetype.startswith('text'):
-            with open(filepath, 'r', encoding='utf-8') as f:
-                message += f"\nArchivo: {f.read()}"
-        elif file.mimetype.startswith('image'):
-            with open(filepath, 'rb') as f:
-                encoded_image = base64.b64encode(f.read()).decode('utf-8')
-                message += f"\n[Imagen: {filename}]"
-        # Note: Files in /tmp/uploads are ephemeral in Render free tier
+        try:
+            file.save(filepath)
+            file_url = f"/static/uploads/{filename}"
+            file_name = filename
+            upload_warning = "Nota: Los archivos subidos son temporales y pueden eliminarse al reiniciar el servidor en el plan gratuito."
+            logger.info(f"File uploaded: {filename}")
+            if file.mimetype.startswith('text'):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    message += f"\nArchivo: {f.read()}"
+            elif file.mimetype.startswith('image'):
+                with open(filepath, 'rb') as f:
+                    encoded_image = base64.b64encode(f.read()).decode('utf-8')
+                    message += f"\n[Imagen: {filename}]"
+        except Exception as e:
+            logger.error(f"Failed to save file: {e}")
+            return jsonify({'error': 'Error al subir el archivo'}), 500
 
     if not message.strip() and not file:
+        logger.warning("Empty message submitted")
         return jsonify({'error': 'Mensaje vacío'}), 400
 
     cache_key = f"chat:{session['user_id']}:{hash(message)}"
     cached_response = redis_client.get(cache_key)
     if cached_response:
+        logger.info(f"Cache hit for user_id: {session['user_id']}, key: {cache_key}")
         return json.loads(cached_response)
 
     conn = db_pool.getconn()
@@ -385,6 +438,7 @@ def chat():
                 )
                 ai_response = response.choices[0].message.content
             except Exception as e:
+                logger.error(f"OpenAI API error: {e}")
                 return jsonify({'error': f'Error en la API de OpenAI: {str(e)}'}), 500
 
             cur.execute(
@@ -401,29 +455,44 @@ def chat():
             conn.commit()
 
             quick_replies = ["Cuéntame más", "Explica en detalle", "¿Puedes dar un ejemplo?"]
-            response_data = {'response': ai_response, 'quick_replies': quick_replies}
+            response_data = {
+                'response': ai_response,
+                'quick_replies': quick_replies,
+                'upload_warning': upload_warning
+            }
             redis_client.setex(cache_key, 3600, json.dumps(response_data))
+            logger.info(f"Chat response generated for user_id: {session['user_id']}")
 
             achievements = check_achievements(session['user_id'])
             if achievements:
                 socketio.emit('achievement', achievements, to=str(session['user_id']))
+                logger.info(f"Achievements awarded for user_id: {session['user_id']}")
 
             return jsonify(response_data)
+    except Exception as e:
+        logger.error(f"Chat processing error: {e}")
+        return jsonify({'error': 'Error al procesar el mensaje'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/static/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    try:
+        return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        logger.error(f"Failed to serve file {filename}: {e}")
+        return jsonify({'error': 'Archivo no encontrado'}), 404
 
 @app.route('/edit_message', methods=['POST'])
 def edit_message():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /edit_message")
         return jsonify({'error': 'No autenticado'}), 401
     data = request.get_json()
     message_id = data.get('message_id')
     new_message = data.get('new_message')
     if not message_id or not new_message:
+        logger.warning("Invalid data for edit_message")
         return jsonify({'error': 'Datos inválidos'}), 400
     conn = db_pool.getconn()
     try:
@@ -435,18 +504,25 @@ def edit_message():
             )
             if cur.fetchone():
                 conn.commit()
+                logger.info(f"Message {message_id} edited for user_id: {session['user_id']}")
                 return jsonify({'success': 'Mensaje editado'})
+            logger.warning(f"Message {message_id} not found or unauthorized for user_id: {session['user_id']}")
             return jsonify({'error': 'Mensaje no encontrado o no autorizado'}), 404
+    except Exception as e:
+        logger.error(f"Failed to edit message: {e}")
+        return jsonify({'error': 'Error al editar el mensaje'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/delete_message', methods=['POST'])
 def delete_message():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /delete_message")
         return jsonify({'error': 'No autenticado'}), 401
     data = request.get_json()
     message_id = data.get('message_id')
     if not message_id:
+        logger.warning("Invalid data for delete_message")
         return jsonify({'error': 'Datos inválidos'}), 400
     conn = db_pool.getconn()
     try:
@@ -457,14 +533,20 @@ def delete_message():
             )
             if cur.fetchone():
                 conn.commit()
+                logger.info(f"Message {message_id} deleted for user_id: {session['user_id']}")
                 return jsonify({'success': 'Mensaje eliminado'})
+            logger.warning(f"Message {message_id} not found or unauthorized for user_id: {session['user_id']}")
             return jsonify({'error': 'Mensaje no encontrado o no autorizado'}), 404
+    except Exception as e:
+        logger.error(f"Failed to delete message: {e}")
+        return jsonify({'error': 'Error al eliminar el mensaje'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/tasks', methods=['GET', 'POST'])
 def tasks():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /tasks")
         return jsonify({'error': 'No autenticado'}), 401
     conn = db_pool.getconn()
     try:
@@ -473,16 +555,19 @@ def tasks():
                 description = request.form.get('description')
                 scheduled_time = request.form.get('scheduled_time')  # Format: YYYY-MM-DD HH:MM
                 if not description or not scheduled_time:
+                    logger.warning("Invalid task data submitted")
                     return jsonify({'error': 'Datos inválidos'}), 400
                 try:
                     scheduled_time = datetime.datetime.strptime(scheduled_time, '%Y-%m-%d %H:%M')
                 except ValueError:
+                    logger.warning("Invalid date format for task")
                     return jsonify({'error': 'Formato de fecha inválido'}), 400
                 cur.execute(
                     "INSERT INTO tasks (user_id, description, scheduled_time) VALUES (%s, %s, %s)",
                     (session['user_id'], description, scheduled_time)
                 )
                 conn.commit()
+                logger.info(f"Task scheduled for user_id: {session['user_id']}")
                 return jsonify({'success': 'Tarea programada'})
             else:
                 cur.execute(
@@ -490,17 +575,23 @@ def tasks():
                     (session['user_id'],)
                 )
                 tasks = [{'id': row[0], 'description': row[1], 'scheduled_time': row[2].strftime('%Y-%m-%d %H:%M')} for row in cur.fetchall()]
+                logger.info(f"Retrieved tasks for user_id: {session['user_id']}")
                 return jsonify(tasks)
+    except Exception as e:
+        logger.error(f"Failed to handle tasks: {e}")
+        return jsonify({'error': 'Error al procesar tareas'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/delete_task', methods=['POST'])
 def delete_task():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /delete_task")
         return jsonify({'error': 'No autenticado'}), 401
     data = request.get_json()
     task_id = data.get('task_id')
     if not task_id:
+        logger.warning("Invalid data for delete_task")
         return jsonify({'error': 'Datos inválidos'}), 400
     conn = db_pool.getconn()
     try:
@@ -511,14 +602,20 @@ def delete_task():
             )
             if cur.fetchone():
                 conn.commit()
+                logger.info(f"Task {task_id} deleted for user_id: {session['user_id']}")
                 return jsonify({'success': 'Tarea eliminada'})
+            logger.warning(f"Task {task_id} not found or unauthorized for user_id: {session['user_id']}")
             return jsonify({'error': 'Tarea no encontrada o no autorizada'}), 404
+    except Exception as e:
+        logger.error(f"Failed to delete task: {e}")
+        return jsonify({'error': 'Error al eliminar la tarea'}), 500
     finally:
         db_pool.putconn(conn)
 
 @app.route('/achievements', methods=['GET'])
 def achievements():
     if 'user_id' not in session:
+        logger.warning("Unauthorized access attempt to /achievements")
         return jsonify({'error': 'No autenticado'}), 401
     conn = db_pool.getconn()
     try:
@@ -528,7 +625,11 @@ def achievements():
                 (session['user_id'],)
             )
             achievements = [{'name': row[0], 'description': row[1], 'achieved_at': row[2].strftime('%Y-%m-%d %H:%M')} for row in cur.fetchall()]
+            logger.info(f"Retrieved achievements for user_id: {session['user_id']}")
             return jsonify(achievements)
+    except Exception as e:
+        logger.error(f"Failed to retrieve achievements: {e}")
+        return jsonify({'error': 'Error al recuperar logros'}), 500
     finally:
         db_pool.putconn(conn)
 
@@ -536,6 +637,7 @@ def achievements():
 def handle_connect():
     if 'user_id' in session:
         emit('user_connected', {'user_id': session['user_id'], 'username': session['username']}, broadcast=True)
+        logger.info(f"WebSocket connected for user_id: {session['user_id']}")
 
 if __name__ == '__main__':
     init_db()
