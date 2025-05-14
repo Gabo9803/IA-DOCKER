@@ -1,39 +1,48 @@
 services:
   - type: web
     name: chatbot-app
-    env: docker
+    runtime: docker
     dockerfilePath: ./Dockerfile
-    plan: free
-    region: oregon  # Specify region (e.g., oregon, frankfurt, singapore)
+    repo: https://github.com/Gabo9803/IA-DOCKER  # Cambia por tu URL de repositorio
+    branch: main  # Cambia si usas otra rama
+    plan: free  # O starter/pro según necesidades
+    region: us-east  # Ajusta según tu región
     numInstances: 1
-    healthCheckPath: /
+    autoDeploy: true  # Despliega automáticamente al hacer push
     envVars:
       - key: FLASK_ENV
-        value: production
+        value: production  # Cambiado a production para Render
+      - key: POSTGRES_USER
+        value: postgres
+      - key: POSTGRES_PASSWORD
+        sync: false  # Configura manualmente en el dashboard
+      - key: POSTGRES_DB
+        value: chatbot_db
       - key: OPENAI_API_KEY
-        sync: false  # Set manually in Render dashboard
-      - key: DATABASE_URL
+        sync: false  # Configura manualmente en el dashboard
+      - key: REDIS_HOST
         fromService:
-          type: database
+          name: chatbot-redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          name: chatbot-redis
+          property: port
+      - key: DATABASE_URL
+        fromDatabase:
           name: chatbot-db
           property: connectionString
-      - key: REDIS_URL
-        fromService:
-          type: redis
-          name: chatbot-redis
-          property: connectionString
-    autoDeploy: true
-
-  - type: database
-    name: chatbot-db
-    plan: free
-    region: oregon  # Must match web service region
-    databaseName: chatbot_db
-    version: "13"
+    healthCheckPath: /  # Render verifica que la app responde en la raíz
 
   - type: redis
     name: chatbot-redis
-    plan: free
-    region: oregon  # Must match web service region
-    ipAllowList: []
-    maxmemoryPolicy: volatile-lru
+    plan: free  # O premium según necesidades
+    maxmemoryPolicy: allkeys-lru  # Política de memoria para Redis
+    ipAllowList: []  # Acceso solo desde servicios internos
+
+databases:
+  - name: chatbot-db
+    databaseName: chatbot_db
+    user: postgres
+    plan: free  # O starter/pro según necesidades
+    ipAllowList: []  # Acceso solo desde servicios internos
