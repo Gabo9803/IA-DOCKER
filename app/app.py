@@ -15,39 +15,108 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from langdetect import detect, DetectorFactory
 from werkzeug.utils import secure_filename
 import logging
+import shutil
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Ensure consistent language detection
+DetectorFactory.seed = 0
+
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
-socketio = SocketIO(app)
+app.secret_key = os.getenv("SECRET_KEY", os.urandom(24))
+socketio = SocketIO(app, cors_allowed_origins="*")  # Allow HTTPS for Render
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 redis_client = redis.Redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
 
 # Database connection using DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
-db_pool = pool.SimpleConnectionPool(
-    1, 20,
-    dsn=DATABASE_URL
-)
+try:
+    db_pool = pool.SimpleConnectionPool(
+        1, 10,  # Reduced max connections for free tier
+        dsn=DATABASE_URL
+    )
+    logger.info("Database pool initialized")
+except Exception as e:
+    logger.error(f"Failed to initialize database pool: {e}")
+    raise
 
-# Ephemeral storage for file uploads (free tier)
+# Ephemeral storage for file uploads
 UPLOAD_FOLDER = '/tmp/uploads'
 try:
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.chmod(UPLOAD_FOLDER, 0o777)  # Ensure write permissions
+    logger.info(f"Upload folder created: {UPLOAD_FOLDER}")
 except Exception as e:
-    logger.error(f"Failed to create/set permissions for UPLOAD_FOLDER: {e}")
+    logger.error(f"Failed to create upload folder: {e}")
+    raise
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-ALLOWED_EXTENSIONS = {'txt', 'jpg', 'jpeg', 'png'}  # Removed 'pdf' for free tier
+ALLOWED_EXTENSIONS = {'txt', 'jpg', 'jpeg', 'png'}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def clean_upload_folder():
+    """Clean old files from upload folder (older than 24 hours)."""
+    try:
+        now = time.time()
+        for filename in os.listdir(app.config['UPLOAD_FOLDER']):
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            if os.path.isfile(file_path) and (now - os.path.getmtime(file_path)) > 24 * 3600:
+                os.remove(file_path)
+                logger.info(f"Cleaned old file: {filename}")
+    except Exception as e:
+        logger.error(f"Failed to clean upload folder: {e}")
+
+def notify_task(user_id, task_id, description):
+    """Send task notification via SocketIO."""
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM tasks WHERE id = %s AND user_id = %s RETURNING id",
+                (task_id, user_id)
+            )
+            if cur.fetchone():
+                conn.commit()
+                socketio.emit('task_notification', {
+                    'user_id': user_id,
+                    'description': description,
+                    'timestamp': datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+                }, to=str(user_id))
+                logger.info(f"Task {task_id} notified and deleted for user_id: {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to notify task {task_id}: {e}")
+    finally:
+        db_pool.putconn(conn)
+
+def schedule_tasks():
+    """Schedule all pending tasks from the database."""
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, user_id, description, scheduled_time FROM tasks WHERE scheduled_time > CURRENT_TIMESTAMP"
+            )
+            tasks = cur.fetchall()
+            scheduler = BackgroundScheduler()
+            for task_id, user_id, description, scheduled_time in tasks:
+                scheduler.add_job(
+                    notify_task,
+                    'date',
+                    run_date=scheduled_time,
+                    args=[user_id, task_id, description]
+                )
+            scheduler.start()
+            logger.info("Scheduled pending tasks")
+    except Exception as e:
+        logger.error(f"Failed to schedule tasks: {e}")
+    finally:
+        db_pool.putconn(conn)
 
 def init_db():
     conn = db_pool.getconn()
@@ -118,6 +187,7 @@ def init_db():
             logger.info("Database initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
+        raise
     finally:
         db_pool.putconn(conn)
 
@@ -195,6 +265,7 @@ def login():
                 logger.warning(f"Failed login attempt for username: {username}")
         except Exception as e:
             logger.error(f"Login error: {e}")
+            flash('Error al iniciar sesión', 'error')
         finally:
             db_pool.putconn(conn)
     return render_template('login.html')
@@ -256,7 +327,16 @@ def history():
                 "WHERE c.user_id = %s ORDER BY c.timestamp ASC",
                 (session['user_id'],)
             )
-            messages = [{'id': row[0], 'user_message': row[1], 'ai_response': row[2], 'timestamp': row[3].strftime('%H:%M:%S'), 'edited': row[4], 'file_url': row[5], 'file_name': row[6], 'avatar': row[7]} for row in cur.fetchall()]
+            messages = [{
+                'id': row[0],
+                'user_message': row[1],
+                'ai_response': row[2],
+                'timestamp': row[3].strftime('%H:%M:%S'),
+                'edited': row[4],
+                'file_url': row[5],
+                'file_name': row[6],
+                'avatar': row[7]
+            } for row in cur.fetchall()]
             logger.info(f"Retrieved chat history for user_id: {session['user_id']}")
             return jsonify(messages)
     except Exception as e:
@@ -345,7 +425,7 @@ def chat():
     file = request.files.get('file')
     file_url = None
     file_name = None
-    upload_warning = None
+    upload_warning = "Nota: Los archivos subidos son temporales y pueden eliminarse al reiniciar el servidor en el plan gratuito."
 
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
@@ -354,7 +434,6 @@ def chat():
             file.save(filepath)
             file_url = f"/static/uploads/{filename}"
             file_name = filename
-            upload_warning = "Nota: Los archivos subidos son temporales y pueden eliminarse al reiniciar el servidor en el plan gratuito."
             logger.info(f"File uploaded: {filename}")
             if file.mimetype.startswith('text'):
                 with open(filepath, 'r', encoding='utf-8') as f:
@@ -458,7 +537,7 @@ def chat():
             response_data = {
                 'response': ai_response,
                 'quick_replies': quick_replies,
-                'upload_warning': upload_warning
+                'upload_warning': upload_warning if file else None
             }
             redis_client.setex(cache_key, 3600, json.dumps(response_data))
             logger.info(f"Chat response generated for user_id: {session['user_id']}")
@@ -559,22 +638,38 @@ def tasks():
                     return jsonify({'error': 'Datos inválidos'}), 400
                 try:
                     scheduled_time = datetime.datetime.strptime(scheduled_time, '%Y-%m-%d %H:%M')
+                    if scheduled_time <= datetime.datetime.now():
+                        logger.warning("Task scheduled time is in the past")
+                        return jsonify({'error': 'La fecha debe ser futura'}), 400
                 except ValueError:
                     logger.warning("Invalid date format for task")
                     return jsonify({'error': 'Formato de fecha inválido'}), 400
                 cur.execute(
-                    "INSERT INTO tasks (user_id, description, scheduled_time) VALUES (%s, %s, %s)",
+                    "INSERT INTO tasks (user_id, description, scheduled_time) VALUES (%s, %s, %s) RETURNING id",
                     (session['user_id'], description, scheduled_time)
                 )
+                task_id = cur.fetchone()[0]
                 conn.commit()
-                logger.info(f"Task scheduled for user_id: {session['user_id']}")
+                scheduler = BackgroundScheduler()
+                scheduler.add_job(
+                    notify_task,
+                    'date',
+                    run_date=scheduled_time,
+                    args=[session['user_id'], task_id, description]
+                )
+                scheduler.start()
+                logger.info(f"Task {task_id} scheduled for user_id: {session['user_id']}")
                 return jsonify({'success': 'Tarea programada'})
             else:
                 cur.execute(
                     "SELECT id, description, scheduled_time FROM tasks WHERE user_id = %s",
                     (session['user_id'],)
                 )
-                tasks = [{'id': row[0], 'description': row[1], 'scheduled_time': row[2].strftime('%Y-%m-%d %H:%M')} for row in cur.fetchall()]
+                tasks = [{
+                    'id': row[0],
+                    'description': row[1],
+                    'scheduled_time': row[2].strftime('%Y-%m-%d %H:%M')
+                } for row in cur.fetchall()]
                 logger.info(f"Retrieved tasks for user_id: {session['user_id']}")
                 return jsonify(tasks)
     except Exception as e:
@@ -624,7 +719,11 @@ def achievements():
                 "SELECT name, description, achieved_at FROM achievements WHERE user_id = %s ORDER BY achieved_at DESC",
                 (session['user_id'],)
             )
-            achievements = [{'name': row[0], 'description': row[1], 'achieved_at': row[2].strftime('%Y-%m-%d %H:%M')} for row in cur.fetchall()]
+            achievements = [{
+                'name': row[0],
+                'description': row[1],
+                'achieved_at': row[2].strftime('%Y-%m-%d %H:%M')
+            } for row in cur.fetchall()]
             logger.info(f"Retrieved achievements for user_id: {session['user_id']}")
             return jsonify(achievements)
     except Exception as e:
@@ -641,4 +740,10 @@ def handle_connect():
 
 if __name__ == '__main__':
     init_db()
-    socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)
+    # Schedule cleanup of upload folder every 24 hours
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(clean_upload_folder, 'interval', hours=24)
+    scheduler.start()
+    # Schedule tasks at startup
+    schedule_tasks()
+    socketio.run(app, host='0.0.0.0', port=int(os.getenv("PORT", 5000)))
